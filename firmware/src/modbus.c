@@ -23,14 +23,13 @@ void modbusException(uint8_t *data, uint8_t code);
 #define INPUT_COUNT								(BUTTONS_COUNT)
 
 #define MAX_HOLDING_COUNT 				(0x07D)
-#define HOLDING_COUNT							(6)
+#define HOLDING_COUNT							(5)
 
 #define REG_ADDR_MODBUS_ID				(0x00)
-#define REG_ADDR_MODBUS_MODE			(0x01)
-#define REG_ADDR_MODBUS_BAUD			(0x02)
-#define REG_ADDR_MODBUS_PARITY		(0x03)
-#define REG_ADDR_MODBUS_SAVE			(0x04)
-#define REG_ADDR_LEDS							(0x05)
+#define REG_ADDR_MODBUS_BAUD			(0x01)
+#define REG_ADDR_MODBUS_PARITY		(0x02)
+#define REG_ADDR_MODBUS_SAVE			(0x03)
+#define REG_ADDR_LEDS							(0x04)
 
 #define MODBUS_CONFIG_SAVE_VAL		(0x01)
 
@@ -125,9 +124,6 @@ uint8_t readReg(const uint8_t addr, uint16_t *value) {
 		case REG_ADDR_MODBUS_ID:
 			*value = gModbusConfig.id;
 			break;
-		case REG_ADDR_MODBUS_MODE:
-			*value = gModbusConfig.mode;
-			break;
 		case REG_ADDR_MODBUS_BAUD:
 			*value = gModbusConfig.baud;
 			break;
@@ -160,12 +156,6 @@ uint8_t writeReg(const uint8_t addr, const uint16_t value) {
 			if ((value > 0) && (value <= MODBUS_MAX_VALID_ADDRESS)) {				
 				gModbusConfig.id = (uint8_t)value; 
 			} else res = MODBUS_ILLEGAL_DATA_VALUE;
-			break;
-			case REG_ADDR_MODBUS_MODE: 
-				if ((value >= MODBUS_MODE_ASCII) && (value <= MODBUS_MODE_RTU)) {
-					gModbusConfig.mode = value;
-					rs485_init(&gModbusConfig);
-				} else res = MODBUS_ILLEGAL_DATA_VALUE;
 			break;
 			case REG_ADDR_MODBUS_BAUD:
 				if ((value >= RS485_BAUD_4800) && (value <= RS485_BAUD_115200)) {

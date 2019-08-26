@@ -12,7 +12,6 @@
 
 #include "stm8s.h"
 
-
 typedef enum {
    RS485_NO_PARITY = 0,
    RS485_EVEN = 1,
@@ -28,14 +27,8 @@ typedef enum _RS485_BAUD {
   RS485_BAUD_115200 = 5 
 } RS485_BAUD, *pRS485_BAUD;
 
-typedef enum _MODBUS_MODE {
-  MODBUS_MODE_ASCII = 0,
-  MODBUS_MODE_RTU   = 1
-} MODBUS_MODE, *pMODBUS_MODE;
-
 typedef struct _MODBUS_CONFIG {
 	 uint8_t							id;
-   MODBUS_MODE          mode;
    RS485_BAUD           baud;
    RS485_PARITY         parity;    
 } MODBUS_CONFIG, *pMODBUS_CONFIG;

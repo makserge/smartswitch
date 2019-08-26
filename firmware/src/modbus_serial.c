@@ -13,10 +13,6 @@
 #include "eeprom.h"
 #include "vtimer.h"
 
-#define MODBUS_ASCII_SOF			(0x3A)
-#define MODBUS_ASCII_CR				(0x0D)
-#define MODBUS_ASCII_LF				(0x0A)
-
 const uint16_t gRS485_RTU_TIMEOUT[] = {
 	8000,  // RS485_BAUD_4800
 	4000,  // RS485_BAUD_9600
@@ -27,21 +23,6 @@ const uint16_t gRS485_RTU_TIMEOUT[] = {
 };
 
 const uint8_t HEX[] = "0123456789ABCDEF";
-
-typedef enum {
-	ASCII_STATE_IDLE = 0,
-	ASCII_STATE_RECEIVE_DATA_HIGH,
-	ASCII_STATE_RECEIVE_DATA_LOW,
-	ASCII_STATE_WAIT_LF,
-	ASCII_STATE_FRAME_RECEIVED,
-	ASCII_STATE_TRANSMIT_SOF,
-	ASCII_STATE_TRANSMIT_DATA_HIGH,
-	ASCII_STATE_TRANSMIT_DATA_LOW,
-	ASCII_STATE_TRANSMIT_LRC_HIGH,
-	ASCII_STATE_TRANSMIT_LRC_LOW,
-	ASCII_STATE_TRANSMIT_CR,
-	ASCII_STATE_TRANSMIT_LF
-} ASCII_STATE;
 
 typedef enum {
 	RTU_STATE_IDLE = 0,
@@ -64,19 +45,8 @@ typedef struct {
 } MODBUS_RTU_STATE_MASHINE, *pMODBUS_RTU_STATE_MASHINE;
 
 typedef struct {
-	ASCII_STATE  	state;
-	uint8_t 			lrc;
-	uint8_t 			byteIndex;
-	uint8_t				txByteCount;
-} MODBUS_ASCII_STATE_MASHINE, *pMODBUS_ASCII_STATE_MASHINE;
-
-typedef struct {
 	RS485_BAUD		baud;
-	MODBUS_MODE 	mode;
-	union {
-		MODBUS_RTU_STATE_MASHINE 		rtu;
-		MODBUS_ASCII_STATE_MASHINE 	ascii;
-	};
+	MODBUS_RTU_STATE_MASHINE 		rtu;
 	uint8_t buf[RS485_FRAME_SIZE + 1];
 } RS485_STATE, *pRS485_STATE;
 
@@ -84,7 +54,6 @@ void startModbusRtuTimer(void);
 
 static const MODBUS_CONFIG gModbusDefaultConfig = {
 	1,
-	MODBUS_MODE_RTU,
 	RS485_BAUD_9600,
 	RS485_NO_PARITY		
 };
@@ -127,41 +96,23 @@ RS485_ERROR rs485_init(pMODBUS_CONFIG pCfg) {
 		default:
 			return RS485_ERROR_WRONG_BAUD;
   }
-	gRS485State.mode = pCfg->mode;
 	gRS485State.baud = pCfg->baud;	
-	if (pCfg->mode == MODBUS_MODE_RTU) {
-		switch (pCfg->parity) {
-			case RS485_NO_PARITY:
-				cr1 = 0;
-				cr3 = (2 << 4);
-				break;
-			case RS485_EVEN:
-				cr1 = (1 << 4) | (1 << 2) | (0 << 1);
-				cr3 = 0;
-				break;
-			case RS485_ODD:
-				cr1 = (1 << 4) | (1 << 2) | (1 << 1);
-				cr3 = 0;
-				break;
-			default:
-				return RS485_ERROR_WRONG_PARITY;
-		}			
-  } else if (pCfg->mode == MODBUS_MODE_ASCII) {
-		cr3 = 0;
-		switch (pCfg->parity) {
-			case RS485_NO_PARITY:
-				cr1 = 0;
-				break;
-			case RS485_EVEN:
-				cr1 = (1 << 2) | (0 << 1);
-				break;
-			case RS485_ODD:
-				cr1 = (1 << 2) | (1 << 1);
-				break;
-			default:
-				return RS485_ERROR_WRONG_PARITY;    		
-		}
-	}
+	switch (pCfg->parity) {
+		case RS485_NO_PARITY:
+			cr1 = 0;
+			cr3 = (2 << 4);
+			break;
+		case RS485_EVEN:
+			cr1 = (1 << 4) | (1 << 2) | (0 << 1);
+			cr3 = 0;
+			break;
+		case RS485_ODD:
+			cr1 = (1 << 4) | (1 << 2) | (1 << 1);
+			cr3 = 0;
+			break;
+		default:
+			return RS485_ERROR_WRONG_PARITY;
+  }
 	UART1->CR1 = cr1;
 	UART1->CR3 = cr3;
   UART1->BRR2 = ((div & 0xF000) >> 8 ) | (div & 0x0F);
@@ -183,7 +134,6 @@ void modbusInit(void) {
 void saveSerialConfig(void) {
 	uint16_t crc;
 	eepromWrite((uint8_t*)EEPROM_ADDR_MODBUS_ID, gModbusConfig.id);
-	eepromWrite((uint8_t*)EEPROM_ADDR_MODBUS_MODE, gModbusConfig.mode);
 	eepromWrite((uint8_t*)EEPROM_ADDR_MODBUS_BAUD, gModbusConfig.baud);
 	eepromWrite((uint8_t*)EEPROM_ADDR_MODBUS_PARITY, gModbusConfig.parity);
   crc = rtuCRC((uint8_t*)EEPROM_ADDR_MODBUS_ID, 4);
@@ -201,7 +151,6 @@ void loadSerialConfig(void) {
 	uint16_t rdCRC = LE16(EEPROM_ADDR_MODBUS_CRCL);
 	if (crc == rdCRC) {
 		gModbusConfig.id = *(uint8_t*) EEPROM_ADDR_MODBUS_ID;
-		gModbusConfig.mode = *(pMODBUS_MODE) EEPROM_ADDR_MODBUS_MODE;
 		gModbusConfig.baud = *(pRS485_BAUD) EEPROM_ADDR_MODBUS_BAUD;
 		gModbusConfig.parity = *(pRS485_PARITY)	EEPROM_ADDR_MODBUS_PARITY;
 	} else {
@@ -242,266 +191,118 @@ INTERRUPT_HANDLER(UART1_Rx_IRQHandler, 20) {
 	uint8_t status = UART1->SR;		
 	if (status & UART1_SR_RXNE) {
 		uint8_t data = UART1->DR;					
-		if (st->mode == MODBUS_MODE_ASCII) {				 
-			ASCII_STATE state = st->ascii.state;
-			data &= 0x7F;
-			//if (status & (UART1_SR_PE | UART1_SR_OR)) {
-				// Parity error
-			//	state = ASCII_STATE_IDLE;
-			//} else if (((state == ASCII_STATE_IDLE) || 
-			if (((state == ASCII_STATE_IDLE) || 
-									(state == ASCII_STATE_RECEIVE_DATA_HIGH) ||
-									(state == ASCII_STATE_RECEIVE_DATA_LOW) ||
-									(state == ASCII_STATE_WAIT_LF)) &&
-									(data == MODBUS_ASCII_SOF)) {
-								// Switching from any receive state to recv first byte
-				st->ascii.state = ASCII_STATE_RECEIVE_DATA_HIGH;
-				st->ascii.byteIndex = 0;
-				st->ascii.lrc = 0x00;
-			} else if (state == ASCII_STATE_RECEIVE_DATA_HIGH) {	
-				// Wait high 4 bit of data or CR
-				uint8_t val = symToHex(data);
-				if (val <= 0x0F) {
-				  // Normal hex digit
-					st->buf[st->ascii.byteIndex] = (val << 4);
-					st->ascii.state = ASCII_STATE_RECEIVE_DATA_LOW;
-				} else {
-					// Not a hex digit
-					if (data == MODBUS_ASCII_CR) {
-						//check crc value;
-						if (st->ascii.lrc == 0) {
-							// Success - wait LF
-							st->ascii.state = ASCII_STATE_WAIT_LF;
-						} else {
-							// Checksum error
-							st->ascii.state = ASCII_STATE_IDLE; 
-						}
-					} else st->ascii.state = ASCII_STATE_IDLE; // Not CR
-				}
-			} else if (state == ASCII_STATE_RECEIVE_DATA_LOW) {
-				// Wait low 4 bit
-				uint8_t val = symToHex(data);
-				if (val <= 0x0F) {
-					// Normal hex digit
-					st->buf[st->ascii.byteIndex] |= val;
-					st->ascii.lrc += st->buf[st->ascii.byteIndex];
-					st->ascii.byteIndex++;
-					if (st->ascii.byteIndex > RS485_FRAME_SIZE) {
-						// Too many data RECEIVEd
-						st->ascii.state = ASCII_STATE_IDLE;
-					} else {
-						st->ascii.state = ASCII_STATE_RECEIVE_DATA_HIGH;
-					}
-				} else {
-					// Not a hex digit, - error
-					st->ascii.state = ASCII_STATE_IDLE; 
-				}
-			}	else if (state == ASCII_STATE_WAIT_LF) {
-				if (data == MODBUS_ASCII_LF) {
-					// Modbus frame received
-					st->ascii.state = ASCII_STATE_FRAME_RECEIVED;
-					// Process received frame, without CRC
-					if (modbusRx(st->buf, st->ascii.byteIndex - 1) == MODBUS_NO_FUTURE_PROCESSING_REQUIRED) {
-						// Frame not need to be processed
-						if (st->ascii.state == ASCII_STATE_FRAME_RECEIVED) {
-							// Switch to idle, if state not changed
-							st->ascii.state = ASCII_STATE_IDLE;
-						}
-					}
-				} else st->ascii.state = ASCII_STATE_IDLE;
-			}
-		// End of ASCII mode
-		}	else if (st->mode == MODBUS_MODE_RTU){
-			// Receive in RTU mode
-			RTU_STATE state = st->rtu.state;				
-			// Start/restart timeout timer for RTU mode
-			if ((state == RTU_STATE_IDLE) ||
+		RTU_STATE state = st->rtu.state;				
+	if ((state == RTU_STATE_IDLE) ||
 				(state == RTU_STATE_RECEIVE_DATA)) {
-				startModbusRtuTimer();
-			}		
-			//if (status & (UART1_SR_PE | UART1_SR_OR)){
+			startModbusRtuTimer();
+		}
+		if (status & (UART1_SR_PE | UART1_SR_OR)) {
 			// Parity error
-			//		st->rtu.state = RTU_STATE_PARITY_ERROR;
-			//} else if (state == RTU_STATE_IDLE){
-			if (state == RTU_STATE_IDLE) {	
-				// First byte received
-				st->rtu.byteIndex = 1;
-				st->rtu.state = RTU_STATE_RECEIVE_DATA;							
-				st->buf[0] = data;
-			} else if (state == RTU_STATE_RECEIVE_DATA) {
-				st->buf[st->rtu.byteIndex++] = data;
-				if (st->rtu.byteIndex > RS485_FRAME_SIZE) {
-					// Frame too big for us
-					st->rtu.state = RTU_STATE_LONG_FRAME;
-				}
+			st->rtu.state = RTU_STATE_PARITY_ERROR;
+		} else if (state == RTU_STATE_IDLE) {
+			// First byte received
+			st->rtu.byteIndex = 1;
+			st->rtu.state = RTU_STATE_RECEIVE_DATA;							
+			st->buf[0] = data;
+		} else if (state == RTU_STATE_RECEIVE_DATA) {
+			st->buf[st->rtu.byteIndex++] = data;
+			if (st->rtu.byteIndex > RS485_FRAME_SIZE) {
+				// Frame too big for us
+				st->rtu.state = RTU_STATE_LONG_FRAME;
 			}
-			// End of RTU mode	
-		}						
+		}
 	}
 }
 
 void vTimer2Irq(void) {	
 	pRS485_STATE st = &gRS485State;
-	if (st->mode == MODBUS_MODE_RTU) {
-		// Modbus in RTU mode
-		RTU_STATE state = st->rtu.state;
-		if (state == RTU_STATE_RECEIVE_DATA) {
-			// Possible RTU frame received
-			uint8_t len = st->rtu.byteIndex;
-			st->rtu.state = RTU_STATE_FRAME_CHECK;
-			if (len >= 3) {							
-				 // Length is 3 bytes or more
-				uint8_t dataLen = len - 2;
-				uint16_t crc_calc = rtuCRC(st->buf, dataLen);
-				uint16_t crc_recv = LE16(st->buf + dataLen);
-				if (crc_recv == crc_calc) {
-					// Frame successfully received
-					st->rtu.state = RTU_STATE_FRAME_RECEIVED;
-					// Process frame
-					if (modbusRx(st->buf, dataLen) == MODBUS_NO_FUTURE_PROCESSING_REQUIRED) {
-						// Frame not need to be processed
-						if (st->rtu.state == RTU_STATE_FRAME_RECEIVED) {
-							// Switch to idle, if state not changed
-							uint8_t temp = UART1->DR;
-							temp = temp;													
-							st->rtu.state = RTU_STATE_IDLE;
-						}
+	RTU_STATE state = st->rtu.state;
+	if (state == RTU_STATE_RECEIVE_DATA) {
+		// Possible RTU frame received
+		uint8_t len = st->rtu.byteIndex;
+		st->rtu.state = RTU_STATE_FRAME_CHECK;
+		if (len >= 3) {							
+			// Length is 3 bytes or more
+			uint8_t dataLen = len - 2;
+			uint16_t crc_calc = rtuCRC(st->buf, dataLen);
+			uint16_t crc_recv = LE16(st->buf + dataLen);
+			if (crc_recv == crc_calc) {
+				// Frame successfully received
+				st->rtu.state = RTU_STATE_FRAME_RECEIVED;
+				// Process frame
+				if (modbusRx(st->buf, dataLen) == MODBUS_NO_FUTURE_PROCESSING_REQUIRED) {
+					// Frame not need to be processed
+					if (st->rtu.state == RTU_STATE_FRAME_RECEIVED) {
+						// Switch to idle, if state not changed
+						uint8_t temp = UART1->DR;
+						temp = temp;													
+						st->rtu.state = RTU_STATE_IDLE;
 					}
-				} else {
-					// CRC error
-					st->rtu.state = RTU_STATE_IDLE;
-				}														
+				}
 			} else {
-				// Frame length less then 3 bytes
+				// CRC error
 				st->rtu.state = RTU_STATE_IDLE;
-			}
-
-		} else if ((state == RTU_STATE_LONG_FRAME) || 
-					(state == RTU_STATE_PARITY_ERROR)) {
-			// End of long frame, or parity error - switch to idle
+			}														
+		} else {
+			// Frame length less then 3 bytes
 			st->rtu.state = RTU_STATE_IDLE;
-		} else if (state == RTU_STATE_TRANSMIT_PAUSE) {
-		    // Transmit first byte
-			GPIOD->ODR |= (1 << 4); //TX_EN - PD4 (Output) 
-			st->rtu.state = RTU_STATE_TRANSMIT_DATA;
-			UART1->DR = st->buf[st->rtu.byteIndex++];
-		}				
+		}
+	} else if ((state == RTU_STATE_LONG_FRAME) || 
+					(state == RTU_STATE_PARITY_ERROR)) {
+		// End of long frame, or parity error - switch to idle
+		st->rtu.state = RTU_STATE_IDLE;
+	} else if (state == RTU_STATE_TRANSMIT_PAUSE) {
+		// Transmit first byte
+		GPIOD->ODR |= (1 << 4); //TX_EN - PD4 (Output) 
+		st->rtu.state = RTU_STATE_TRANSMIT_DATA;
+		UART1->DR = st->buf[st->rtu.byteIndex++];
 	}
 }
 
 INTERRUPT_HANDLER(UART1_Tx_IRQHandler, 19) {
 	pRS485_STATE st = &gRS485State;	
-    if (UART1->SR & UART1_SR_TC) {
-		if (st->mode == MODBUS_MODE_ASCII) {
-			// Modbus ASCII mode
-			switch (st->ascii.state) {
-				case ASCII_STATE_TRANSMIT_SOF:
-					st->ascii.state = ASCII_STATE_TRANSMIT_DATA_HIGH;
-					UART1->DR = HEX[st->buf[0] >> 4] | 0x80;
-					break;
-				case ASCII_STATE_TRANSMIT_DATA_HIGH:	
-					st->ascii.state = ASCII_STATE_TRANSMIT_DATA_LOW;
-					UART1->DR = HEX[st->buf[st->ascii.byteIndex++] & 0x0F] | 0x80;
-					break;
-				case ASCII_STATE_TRANSMIT_DATA_LOW:
-					if (st->ascii.byteIndex == st->ascii.txByteCount) {
-						st->ascii.state = ASCII_STATE_TRANSMIT_LRC_HIGH;
-						UART1->DR = HEX[st->ascii.lrc >> 4] | 0x80;
-					} else {
-						st->ascii.state = ASCII_STATE_TRANSMIT_DATA_HIGH;
-							UART1->DR = HEX[st->buf[st->ascii.byteIndex] >> 4] | 0x80;
-					}					
-					break;
-				case ASCII_STATE_TRANSMIT_LRC_HIGH: 
-					st->ascii.state = ASCII_STATE_TRANSMIT_LRC_LOW;
-					UART1->DR = HEX[st->ascii.lrc & 0x0F] | 0x80;
-					break;
-				case ASCII_STATE_TRANSMIT_LRC_LOW:
-					st->ascii.state = ASCII_STATE_TRANSMIT_CR;
-					UART1->DR = MODBUS_ASCII_CR;
-					break;
-				case ASCII_STATE_TRANSMIT_CR: 
-					st->ascii.state = ASCII_STATE_TRANSMIT_LF;
-					UART1->DR = MODBUS_ASCII_LF;
-					break;
-				case ASCII_STATE_TRANSMIT_LF:
-					// Switch to RX only - Idle state							
-					st->ascii.state = ASCII_STATE_IDLE;
-					// Enable RX
-					modbusEnableRx();
-					GPIOD->ODR &= ~(1 << 4); 	//TX_EN - PD4 (Output)
-					UART1->SR &= ~UART1_SR_TC;
-					break;
-				default:
-					// Switch to RX only - Idle state
-					st->ascii.state = ASCII_STATE_IDLE;
-					// Enable RX
-					modbusEnableRx();
-					GPIOD->ODR &= ~(1 << 4); 	//TX_EN - PD4 (Output) 
-					UART1->SR &= ~UART1_SR_TC;	
-			}
-		} else {
-			// Modbus RTU mode
-			switch (st->rtu.state) {
-				case RTU_STATE_TRANSMIT_DATA:
-					if (st->rtu.byteIndex == st->rtu.txByteCount) {
-						st->rtu.state = RTU_STATE_TRANSMIT_CRC_LOW;
-						UART1->DR = (st->rtu.crc);
-					} else {
-						UART1->DR = st->buf[st->rtu.byteIndex++];
-					}
-					break;
-				case RTU_STATE_TRANSMIT_CRC_LOW:
-					st->rtu.state = RTU_STATE_TRANSMIT_CRC_HIGH;
-					UART1->DR = (st->rtu.crc >> 8);
-					break;
-				case RTU_STATE_TRANSMIT_CRC_HIGH:
-					st->rtu.state = RTU_STATE_IDLE;
-					GPIOD->ODR &= ~(1 << 4); 	//TX_EN - PD4 (Output)
-					UART1->SR &= ~UART1_SR_TC;
-					// Enable receive
-					modbusEnableRx();
-					break;
-				default:
-					// Switch to RX only - Idle state
-					st->rtu.state = ASCII_STATE_IDLE;
-					modbusEnableRx();
-					GPIOD->ODR &= ~(1 << 4); 	//TX_EN - PD4 (Output) 
-					UART1->SR &= ~UART1_SR_TC;	
-			}
-		} // Modbus RTU mode
+	if (UART1->SR & UART1_SR_TC) {
+		switch (st->rtu.state) {
+			case RTU_STATE_TRANSMIT_DATA:
+				if (st->rtu.byteIndex == st->rtu.txByteCount) {
+					st->rtu.state = RTU_STATE_TRANSMIT_CRC_LOW;
+					UART1->DR = (st->rtu.crc);
+				} else {
+					UART1->DR = st->buf[st->rtu.byteIndex++];
+				}
+				break;
+			case RTU_STATE_TRANSMIT_CRC_LOW:
+				st->rtu.state = RTU_STATE_TRANSMIT_CRC_HIGH;
+				UART1->DR = (st->rtu.crc >> 8);
+				break;
+			case RTU_STATE_TRANSMIT_CRC_HIGH:
+				st->rtu.state = RTU_STATE_IDLE;
+				GPIOD->ODR &= ~(1 << 4); 	//TX_EN - PD4 (Output)
+				UART1->SR &= ~UART1_SR_TC;
+				// Enable receive
+				modbusEnableRx();
+				break;
+			default:
+				// Switch to RX only - Idle state
+				st->rtu.state = RTU_STATE_IDLE;
+				modbusEnableRx();
+				GPIOD->ODR &= ~(1 << 4); 	//TX_EN - PD4 (Output) 
+				UART1->SR &= ~UART1_SR_TC;	
+		}
 	}
 }
 
 void modbusTx(uint8_t *data, const uint8_t size) {
+	RTU_STATE state = 0;
 	pRS485_STATE st = &gRS485State;
 	if (size == 0) return;
 	modbusDisableRx();
-	if (st->mode == MODBUS_MODE_RTU) {
-		// RTU mode send
-		RTU_STATE state = st->rtu.state;
-		if (state != RTU_STATE_FRAME_RECEIVED) return;
-		// Send RTU frame
-		st->rtu.state = RTU_STATE_TRANSMIT_PAUSE;
-		st->rtu.crc = rtuCRC(data, size);
-		st->rtu.byteIndex = 0;
-		st->rtu.txByteCount = size;
-		if (st->buf != data) memcpy(st->buf, data, size);
-		startModbusRtuTimer();
-	} else if (st->mode == MODBUS_MODE_ASCII) {
-		// ASCII mode send
-		ASCII_STATE state = st->ascii.state;
-		uint8_t i = 0, lrc = 0;
-		if (state != ASCII_STATE_FRAME_RECEIVED) return;
-		// Send ASCII frame
-		// Calculate ascii mode CRC
-		GPIOD->ODR |= (1 << 4); 	//TX_EN - PD4 (Output) 
-		for (i = 0; i < size; i++) lrc += data[i];
-		st->ascii.lrc = ~(lrc) + 1;
-		st->ascii.byteIndex = 0;
-		st->ascii.txByteCount = size;
-		if (st->buf != data) memcpy(st->buf, data, size);
-		st->ascii.state = ASCII_STATE_TRANSMIT_SOF;
-		UART1->DR = MODBUS_ASCII_SOF | 0x80;
-	}
+	state = st->rtu.state;
+	if (state != RTU_STATE_FRAME_RECEIVED) return;
+	st->rtu.state = RTU_STATE_TRANSMIT_PAUSE;
+	st->rtu.crc = rtuCRC(data, size);
+	st->rtu.byteIndex = 0;
+	st->rtu.txByteCount = size;
+	if (st->buf != data) memcpy(st->buf, data, size);
+	startModbusRtuTimer();
 }
